@@ -196,6 +196,12 @@ function setupEventListeners() {
 // ======= PERFORMANCE OPTIMIZED DATA LOADING =======
 async function preloadCache(kategori) {
   try {
+    // Cek jika cache methods tersedia
+    if (typeof db.getCache !== "function") {
+      console.log("⚠️ Cache methods not available, skipping preload");
+      return;
+    }
+
     const today = new Date().toLocaleDateString("id-ID");
     const cacheKey = `${kategori}_${today}`;
 
@@ -205,27 +211,26 @@ async function preloadCache(kategori) {
       dataCache.timestamp.set(kategori, Date.now());
     }
   } catch (error) {
-    console.log("Cache preload failed:", error);
+    console.log(
+      "⚠️ Cache preload failed, continuing without cache:",
+      error.message
+    );
+    // Jangan tampilkan error ke user, cukup continue tanpa cache
   }
 }
 
+// Di fungsi loadDataHariIni - tambahkan cache availability check
 async function loadDataHariIni(kategori) {
   const today = new Date().toLocaleDateString("id-ID");
   const cacheKey = `${kategori}_${today}`;
 
-  logger.log("📥 Loading data for:", { kategori, today, cacheKey });
-
-  // Try cache first
+  // Try cache first (jika available)
   const cachedTimestamp = dataCache.timestamp.get(kategori);
   if (cachedTimestamp && Date.now() - cachedTimestamp < 30000) {
-    logger.log("⚡ Using cached data");
     const cachedData = Array.from(dataCache[kategori].values());
     dataDonasi = cachedData.filter((item) => item.tanggal === today);
 
     donaturTerinput[kategori] = new Set(dataDonasi.map((item) => item.donatur));
-
-    logger.log("📊 Cached data count:", dataDonasi.length);
-
     renderTabelTerurut(kategori);
     updateTotalDisplay();
     updateDataCount();
@@ -233,19 +238,22 @@ async function loadDataHariIni(kategori) {
   }
 
   try {
-    console.log("🔄 Fetching from database...");
     const savedData = await db.getDailyInputs(kategori, today);
 
-    console.log("✅ Database results:", savedData.length, "records");
-
-    // Update cache
+    // Update cache (jika cache methods available)
     dataCache[kategori] = new Map(
       savedData.map((item) => [item.donatur, item])
     );
     dataCache.timestamp.set(kategori, Date.now());
 
-    // Save to persistent cache
-    await db.setCache(cacheKey, savedData, 300000);
+    // Save to persistent cache (jika available)
+    if (typeof db.setCache === "function") {
+      try {
+        await db.setCache(cacheKey, savedData, 300000);
+      } catch (cacheError) {
+        console.log("⚠️ Cache save failed, continuing:", cacheError.message);
+      }
+    }
 
     dataDonasi = savedData.map((item) => ({
       donatur: item.donatur,
@@ -255,15 +263,9 @@ async function loadDataHariIni(kategori) {
       id: item.id,
     }));
 
-    // 🔧 FIX: Reset donaturTerinput untuk kategori ini
     donaturTerinput[kategori] = new Set();
     dataDonasi.forEach((item) => {
       donaturTerinput[kategori].add(item.donatur);
-    });
-
-    console.log("✅ Processed data:", {
-      totalRecords: dataDonasi.length,
-      uniqueDonors: donaturTerinput[kategori].size,
     });
 
     renderTabelTerurut(kategori);
@@ -271,9 +273,34 @@ async function loadDataHariIni(kategori) {
     updateDataCount();
   } catch (error) {
     console.error("❌ Error loading data:", error);
-    dataDonasi = [];
-    donaturTerinput[kategori] = new Set();
-    showNotification("Gagal memuat data tersimpan", false);
+
+    // Coba fallback method
+    try {
+      const savedData = await db.getDailyInputsFallback(kategori, today);
+
+      dataDonasi = savedData.map((item) => ({
+        donatur: item.donatur,
+        nominal: item.nominal,
+        tanggal: item.tanggal,
+        kategori: item.kategori,
+        id: item.id,
+      }));
+
+      donaturTerinput[kategori] = new Set();
+      dataDonasi.forEach((item) => {
+        donaturTerinput[kategori].add(item.donatur);
+      });
+
+      renderTabelTerurut(kategori);
+      updateTotalDisplay();
+      updateDataCount();
+    } catch (fallbackError) {
+      console.error("❌ Fallback also failed:", fallbackError);
+
+      // Reset ke state kosong
+      dataDonasi = [];
+      donaturTerinput[kategori] = new Set();
+    }
   }
 }
 
