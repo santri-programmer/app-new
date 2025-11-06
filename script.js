@@ -430,7 +430,15 @@ async function hapusDataHariIni() {
   }
 
   try {
-    const result = await db.deleteDailyInputsByDate(kategori, today);
+    // Coba method utama dulu
+    let result;
+    if (typeof db.deleteDailyInputsByDate === "function") {
+      result = await db.deleteDailyInputsByDate(kategori, today);
+    } else {
+      // Fallback ke method manual
+      console.log("🔄 Using fallback delete method");
+      result = await db.deleteDailyInputsByDateFallback(kategori, today);
+    }
 
     // Clear cache
     dataCache[kategori].clear();
@@ -452,7 +460,60 @@ async function hapusDataHariIni() {
     showNotification("🗑️ Data hari ini berhasil dihapus", true);
   } catch (error) {
     console.error("❌ Error deleting data:", error);
-    showNotification("Gagal menghapus data", false);
+
+    // Coba fallback: delete satu per satu
+    try {
+      console.log("🔄 Trying individual delete fallback...");
+      await deleteDataIndividually(kategori, today);
+
+      // Clear cache
+      dataCache[kategori].clear();
+      dataCache.timestamp.delete(kategori);
+
+      // Reset state
+      dataDonasi = [];
+      donaturTerinput[kategori] = new Set();
+
+      // Batch DOM updates
+      requestAnimationFrame(() => {
+        const tbody = cachedElements.tabelDonasi.querySelector("tbody");
+        tbody.innerHTML = "";
+        updateTotalDisplay();
+        updateDataCount();
+      });
+
+      await muatDropdown(kategori);
+      showNotification("🗑️ Data hari ini berhasil dihapus", true);
+    } catch (fallbackError) {
+      console.error("❌ All delete methods failed:", fallbackError);
+      showNotification("Gagal menghapus data", false);
+    }
+  }
+}
+
+// Fallback function: delete data satu per satu
+async function deleteDataIndividually(kategori, tanggal) {
+  const savedData = await db.getDailyInputs(kategori, tanggal);
+
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (const item of savedData) {
+    try {
+      await db.deleteDailyInput(item.id);
+      successCount++;
+    } catch (error) {
+      errorCount++;
+      console.error("❌ Failed to delete item:", item.id, error);
+    }
+  }
+
+  console.log(
+    `✅ Deleted ${successCount} items individually, ${errorCount} errors`
+  );
+
+  if (errorCount > 0) {
+    throw new Error(`Failed to delete ${errorCount} items`);
   }
 }
 
