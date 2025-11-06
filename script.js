@@ -1,3 +1,18 @@
+// ======= PRODUCTION MODE CHECK =======
+const IS_PRODUCTION =
+  !window.location.hostname.includes("localhost") &&
+  !window.location.hostname.includes("127.0.0.1");
+
+// Utility function untuk conditional logging
+const logger = {
+  log: (...args) => !IS_PRODUCTION && console.log(...args),
+  error: (...args) => console.error(...args),
+  warn: (...args) => console.warn(...args),
+  info: (...args) => !IS_PRODUCTION && console.info(...args),
+  time: (label) => !IS_PRODUCTION && console.time(label),
+  timeEnd: (label) => !IS_PRODUCTION && console.timeEnd(label),
+};
+
 // ======= PERFORMANCE OPTIMIZED DATA & INIT =======
 const kategoriDonatur = {
   kategori1: [
@@ -64,7 +79,7 @@ let db;
 
 // ======= HIGH-PERFORMANCE INITIALIZATION =======
 document.addEventListener("DOMContentLoaded", async function () {
-  console.time("AppInitialization");
+  logger.time("AppInitialization");
 
   try {
     // Initialize database dengan performance monitoring
@@ -96,7 +111,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     });
   });
 
-  console.timeEnd("AppInitialization");
+  logger.timeEnd("AppInitialization");
 });
 
 // Optimized DOM caching
@@ -131,26 +146,37 @@ function setupEventListeners() {
   cachedElements.btnHapus.addEventListener("click", hapusDataHariIni);
 
   // Debounced dropdown change
-  cachedElements.kategoriDonatur.addEventListener(
-    "change",
-    debounce(async function () {
-      const kategori = this.value;
-      showNotification("🔄 Memuat data...", true);
+  cachedElements.kategoriDonatur.addEventListener("change", async function () {
+    const kategori = this.value;
 
-      await Promise.all([loadDataHariIni(kategori), muatDropdown(kategori)]);
+    console.log("🔄 Switching to kategori:", kategori);
+    showNotification("🔄 Memuat data...", true);
 
-      setTimeout(() => {
-        const notif = cachedElements.notifikasi;
-        if (notif.textContent.includes("Memuat data")) {
-          notif.textContent = "";
-          notif.className =
-            "mb-4 md:mb-6 text-center p-3 md:p-4 rounded-xl transition-all duration-300";
-        }
-      }, 300);
-    }, 250)
-  );
+    try {
+      // Load data untuk kategori baru
+      await loadDataHariIni(kategori);
 
-  // Optimized input handling
+      // 🔧 FIX: Muat dropdown SETELAH data terload
+      await muatDropdown(kategori);
+
+      console.log("✅ Kategori switched successfully");
+    } catch (error) {
+      console.error("❌ Error switching kategori:", error);
+      showNotification("Gagal memuat data kategori", false);
+    }
+
+    // Sembunyikan loading state
+    setTimeout(() => {
+      const notif = cachedElements.notifikasi;
+      if (notif.textContent.includes("Memuat data")) {
+        notif.textContent = "";
+        notif.className =
+          "mb-4 md:mb-6 text-center p-3 md:p-4 rounded-xl transition-all duration-300";
+      }
+    }, 500);
+  });
+
+  /// Optimized input handling
   cachedElements.pemasukan.addEventListener(
     "input",
     debounce(function (e) {
@@ -187,14 +213,19 @@ async function loadDataHariIni(kategori) {
   const today = new Date().toLocaleDateString("id-ID");
   const cacheKey = `${kategori}_${today}`;
 
+  logger.log("📥 Loading data for:", { kategori, today, cacheKey });
+
   // Try cache first
   const cachedTimestamp = dataCache.timestamp.get(kategori);
   if (cachedTimestamp && Date.now() - cachedTimestamp < 30000) {
-    // 30 second cache
+    logger.log("⚡ Using cached data");
     const cachedData = Array.from(dataCache[kategori].values());
     dataDonasi = cachedData.filter((item) => item.tanggal === today);
 
     donaturTerinput[kategori] = new Set(dataDonasi.map((item) => item.donatur));
+
+    logger.log("📊 Cached data count:", dataDonasi.length);
+
     renderTabelTerurut(kategori);
     updateTotalDisplay();
     updateDataCount();
@@ -202,7 +233,10 @@ async function loadDataHariIni(kategori) {
   }
 
   try {
+    console.log("🔄 Fetching from database...");
     const savedData = await db.getDailyInputs(kategori, today);
+
+    console.log("✅ Database results:", savedData.length, "records");
 
     // Update cache
     dataCache[kategori] = new Map(
@@ -211,7 +245,7 @@ async function loadDataHariIni(kategori) {
     dataCache.timestamp.set(kategori, Date.now());
 
     // Save to persistent cache
-    await db.setCache(cacheKey, savedData, 300000); // 5 minutes
+    await db.setCache(cacheKey, savedData, 300000);
 
     dataDonasi = savedData.map((item) => ({
       donatur: item.donatur,
@@ -221,9 +255,15 @@ async function loadDataHariIni(kategori) {
       id: item.id,
     }));
 
+    // 🔧 FIX: Reset donaturTerinput untuk kategori ini
     donaturTerinput[kategori] = new Set();
     dataDonasi.forEach((item) => {
       donaturTerinput[kategori].add(item.donatur);
+    });
+
+    console.log("✅ Processed data:", {
+      totalRecords: dataDonasi.length,
+      uniqueDonors: donaturTerinput[kategori].size,
     });
 
     renderTabelTerurut(kategori);
@@ -233,6 +273,7 @@ async function loadDataHariIni(kategori) {
     console.error("❌ Error loading data:", error);
     dataDonasi = [];
     donaturTerinput[kategori] = new Set();
+    showNotification("Gagal memuat data tersimpan", false);
   }
 }
 
@@ -428,39 +469,73 @@ function showNotification(message, isSuccess = true) {
 async function muatDropdown(kategori = "kategori1") {
   const select = cachedElements.donatur;
   const names = kategoriDonatur[kategori];
+
+  logger.log("📝 Loading dropdown for kategori:", kategori);
+  logger.log("📊 Total donatur:", names.length);
+  logger.log("✅ Sudah diinput:", donaturTerinput[kategori]?.size || 0);
+
+  // Filter hanya donatur yang belum diinput
   const donaturBelumDiinput = names.filter(
-    (nama) => !donaturTerinput[kategori].has(nama)
+    (nama) => !donaturTerinput[kategori]?.has(nama)
   );
 
-  // Batch DOM update
-  requestAnimationFrame(() => {
-    select.innerHTML = "";
+  logger.log("📋 Belum diinput:", donaturBelumDiinput.length);
 
-    if (donaturBelumDiinput.length === 0) {
-      const option = new Option("🎉 Semua donatur sudah diinput", "");
-      option.disabled = true;
-      select.appendChild(option);
+  // Kosongkan dropdown
+  select.innerHTML = "";
 
-      cachedElements.btnTambah.disabled = true;
+  if (donaturBelumDiinput.length === 0) {
+    // Semua donatur sudah diinput
+    const option = new Option("🎉 Semua donatur sudah diinput", "");
+    option.disabled = true;
+    select.appendChild(option);
+
+    cachedElements.btnTambah.disabled = true;
+    if (cachedElements.btnTambah.querySelector("#btnText")) {
       cachedElements.btnTambah.querySelector("#btnText").textContent =
         "Selesai";
-      cachedElements.pemasukan.disabled = true;
-    } else {
-      const fragment = document.createDocumentFragment();
-      const defaultOption = new Option("Pilih Donatur", "");
-      defaultOption.disabled = true;
-      fragment.appendChild(defaultOption);
-
-      donaturBelumDiinput.forEach((nama) => {
-        fragment.appendChild(new Option(nama, nama));
-      });
-
-      select.appendChild(fragment);
-      cachedElements.btnTambah.disabled = false;
-      cachedElements.btnTambah.querySelector("#btnText").textContent = "Tambah";
-      cachedElements.pemasukan.disabled = false;
     }
-  });
+    cachedElements.pemasukan.disabled = true;
+
+    console.log("✅ All donors completed for", kategori);
+  } else {
+    // 🔧 FIX: Hanya tambahkan donatur yang tersedia, TANPA default option
+    const fragment = document.createDocumentFragment();
+
+    // 🔧 PERUBAHAN PENTING: Langsung tambahkan donatur pertama sebagai selected
+    if (donaturBelumDiinput.length > 0) {
+      const firstDonor = donaturBelumDiinput[0];
+      const firstOption = new Option(firstDonor, firstDonor);
+      firstOption.selected = true; // Langsung select yang pertama
+      fragment.appendChild(firstOption);
+
+      // Tambahkan sisa donatur (jika ada lebih dari 1)
+      for (let i = 1; i < donaturBelumDiinput.length; i++) {
+        fragment.appendChild(
+          new Option(donaturBelumDiinput[i], donaturBelumDiinput[i])
+        );
+      }
+    }
+
+    select.appendChild(fragment);
+    cachedElements.btnTambah.disabled = false;
+    if (cachedElements.btnTambah.querySelector("#btnText")) {
+      cachedElements.btnTambah.querySelector("#btnText").textContent = "Tambah";
+    }
+    cachedElements.pemasukan.disabled = false;
+
+    logger.log(
+      "✅ Dropdown loaded with",
+      donaturBelumDiinput.length,
+      "options"
+    );
+    logger.log("🎯 First donor auto-selected:", donaturBelumDiinput[0]);
+  }
+
+  // Trigger change event untuk update UI
+  setTimeout(() => {
+    select.dispatchEvent(new Event("change"));
+  }, 10);
 }
 
 function getSortedDataDonasi(kategori) {
