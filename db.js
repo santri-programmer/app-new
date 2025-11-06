@@ -419,6 +419,182 @@ class JimpitanDB {
     });
   }
 
+  // Optimized bulk delete dengan range query
+  async deleteDailyInputsByDate(kategori, tanggal) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+        const store = transaction.objectStore("dailyInputs");
+
+        let index;
+        try {
+          // Coba gunakan composite index dulu
+          index = store.index("kategori_tanggal");
+        } catch (e) {
+          // Fallback ke index kategori biasa
+          console.warn(
+            "⚠️ Composite index not available, using kategori index"
+          );
+          index = store.index("kategori");
+        }
+
+        const range = IDBKeyRange.only([kategori, tanggal]);
+        const request = index.getAll(range);
+
+        request.onsuccess = () => {
+          const itemsToDelete = request.result;
+
+          if (itemsToDelete.length === 0) {
+            resolve({ deletedCount: 0, errorCount: 0 });
+            return;
+          }
+
+          let deletedCount = 0;
+          let errorCount = 0;
+
+          itemsToDelete.forEach((item) => {
+            const deleteRequest = store.delete(item.id);
+            deleteRequest.onsuccess = () => {
+              deletedCount++;
+            };
+            deleteRequest.onerror = () => {
+              errorCount++;
+              console.error("❌ Failed to delete item:", item.id);
+            };
+          });
+
+          transaction.oncomplete = () => {
+            console.log(
+              `✅ Deleted ${deletedCount} records for ${kategori} on ${tanggal}`
+            );
+            resolve({ deletedCount, errorCount });
+          };
+
+          transaction.onerror = () => {
+            console.error("❌ Delete transaction failed");
+            reject(new Error("Transaction failed during deletion"));
+          };
+        };
+
+        request.onerror = () => {
+          console.error("❌ Failed to retrieve data for deletion");
+          reject(new Error("Failed to retrieve data for deletion"));
+        };
+      } catch (error) {
+        console.error("❌ Delete operation error:", error);
+        reject(error);
+      }
+    });
+  }
+
+  // Fallback delete method menggunakan loop manual
+  async deleteDailyInputsByDateFallback(kategori, tanggal) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+        const store = transaction.objectStore("dailyInputs");
+        const index = store.index("kategori");
+
+        const request = index.getAll(kategori);
+
+        request.onsuccess = () => {
+          const allItems = request.result;
+          const itemsToDelete = allItems.filter(
+            (item) => item.tanggal === tanggal
+          );
+
+          if (itemsToDelete.length === 0) {
+            resolve({ deletedCount: 0, errorCount: 0 });
+            return;
+          }
+
+          let deletedCount = 0;
+          let errorCount = 0;
+
+          itemsToDelete.forEach((item) => {
+            const deleteRequest = store.delete(item.id);
+            deleteRequest.onsuccess = () => {
+              deletedCount++;
+            };
+            deleteRequest.onerror = () => {
+              errorCount++;
+            };
+          });
+
+          transaction.oncomplete = () => {
+            resolve({ deletedCount, errorCount });
+          };
+
+          transaction.onerror = () => {
+            reject(new Error("Transaction failed during deletion"));
+          };
+        };
+
+        request.onerror = () => {
+          reject(new Error("Failed to retrieve data for deletion"));
+        };
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  // Batch operations untuk performance
+  async batchSaveDailyInputs(inputsArray) {
+    if (inputsArray.length === 0) return [];
+
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+        const store = transaction.objectStore("dailyInputs");
+
+        const results = [];
+        let completed = 0;
+        let hasError = false;
+
+        inputsArray.forEach((inputData, index) => {
+          const dataWithMeta = {
+            ...inputData,
+            createdAt: new Date().toISOString(),
+            timestamp: Date.now(),
+          };
+
+          const request = store.add(dataWithMeta);
+
+          request.onsuccess = () => {
+            results[index] = request.result;
+            completed++;
+
+            if (completed === inputsArray.length && !hasError) {
+              resolve(results);
+            }
+          };
+
+          request.onerror = () => {
+            hasError = true;
+            console.error(`❌ Failed to save item at index ${index}`);
+            reject(new Error(`Failed to save item at index ${index}`));
+          };
+        });
+
+        transaction.onerror = () => {
+          hasError = true;
+          console.error("❌ Batch save transaction failed");
+          reject(new Error("Batch save transaction failed"));
+        };
+      } catch (error) {
+        console.error("❌ Batch save operation error:", error);
+        reject(error);
+      }
+    });
+  }
+
   // Utility methods dengan better error handling
   async ensureInit() {
     if (!this.initialized) {
