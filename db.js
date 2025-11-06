@@ -1,13 +1,12 @@
-// High Performance IndexedDB Utility - FIXED VERSION
+// High Performance IndexedDB Utility
 class JimpitanDB {
   constructor() {
     this.dbName = "JimpitanAppDB";
-    this.version = 3; // ⚠️ INCREASE VERSION NUMBER
+    this.version = 3;
     this.db = null;
     this.initialized = false;
   }
 
-  // Optimized initialization dengan better error handling
   async init() {
     if (this.initialized && this.db) {
       return this.db;
@@ -17,60 +16,24 @@ class JimpitanDB {
       const request = indexedDB.open(this.dbName, this.version);
 
       request.onerror = () => {
-        console.error("❌ Database opening failed");
         reject(new Error("Failed to open database"));
       };
 
       request.onsuccess = (event) => {
         this.db = event.target.result;
         this.initialized = true;
-
-        console.log("✅ Database initialized successfully");
-
-        // Optimize database settings
-        this.db.onversionchange = () => {
-          console.log("🔄 Database version change detected");
-          this.db.close();
-          this.initialized = false;
-        };
-
         resolve(this.db);
       };
 
       request.onupgradeneeded = (event) => {
-        console.log(
-          "🔄 Database upgrade needed from",
-          event.oldVersion,
-          "to",
-          event.newVersion
-        );
         const db = event.target.result;
         this.createOptimizedStores(db, event.oldVersion);
-      };
-
-      request.onblocked = () => {
-        console.warn("⚠️ Database upgrade blocked by other connections");
       };
     });
   }
 
-  // Create optimized object stores dengan migration support
   createOptimizedStores(db, oldVersion) {
-    console.log("🏗️ Creating/updating database stores...");
-
-    // Migration dari version lama
-    if (oldVersion < 1) {
-      // Initial version - create all stores
-      this.createAllStores(db);
-    } else {
-      // Migration path untuk existing databases
-      this.migrateDatabase(db, oldVersion);
-    }
-  }
-
-  // Create all object stores dari awal
-  createAllStores(db) {
-    // Delete existing stores jika ada (clean start)
+    // Delete existing stores jika ada
     if (db.objectStoreNames.contains("dailyInputs")) {
       db.deleteObjectStore("dailyInputs");
     }
@@ -81,185 +44,347 @@ class JimpitanDB {
       db.deleteObjectStore("cache");
     }
 
-    // Create object store for daily inputs dengan optimized indexes
+    // Create object store for daily inputs
     const store = db.createObjectStore("dailyInputs", {
       keyPath: "id",
       autoIncrement: true,
     });
 
-    // Composite index untuk fastest queries
+    // Create indexes
     store.createIndex("kategori_tanggal", ["kategori", "tanggal"], {
       unique: false,
     });
     store.createIndex("kategori_donatur", ["kategori", "donatur"], {
       unique: false,
     });
-    store.createIndex("tanggal_kategori", ["tanggal", "kategori"], {
-      unique: false,
-    });
-
-    // Single field indexes sebagai fallback
     store.createIndex("kategori", "kategori", { unique: false });
     store.createIndex("tanggal", "tanggal", { unique: false });
     store.createIndex("donatur", "donatur", { unique: false });
     store.createIndex("createdAt", "createdAt", { unique: false });
 
-    console.log("✅ Created dailyInputs store with indexes");
-
-    // Optimized settings store
+    // Create settings store
     const settingsStore = db.createObjectStore("settings", {
       keyPath: "key",
     });
     settingsStore.createIndex("key", "key", { unique: true });
 
-    console.log("✅ Created settings store");
-
-    // Cache store untuk performance
+    // Create cache store
     const cacheStore = db.createObjectStore("cache", {
       keyPath: "key",
     });
     cacheStore.createIndex("expires", "expires", { unique: false });
-
-    console.log("✅ Created cache store");
   }
 
-  // Migration path untuk existing databases
-  migrateDatabase(db, oldVersion) {
-    console.log(
-      `🔄 Migrating database from version ${oldVersion} to ${this.version}`
-    );
-
-    // Migration dari version 1 ke 2
-    if (oldVersion < 2) {
-      if (!db.objectStoreNames.contains("cache")) {
-        const cacheStore = db.createObjectStore("cache", {
-          keyPath: "key",
-        });
-        cacheStore.createIndex("expires", "expires", { unique: false });
-        console.log("✅ Added cache store in migration");
-      }
-    }
-
-    // Migration dari version 2 ke 3
-    if (oldVersion < 3) {
-      // Recreate stores dengan indexes yang benar
-      this.createAllStores(db);
+  async ensureInit() {
+    if (!this.initialized) {
+      await this.init();
     }
   }
 
-  // High-performance save dengan batch operations support
+  // === DAILY INPUTS METHODS ===
+
   async saveDailyInput(inputData) {
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
-        const store = transaction.objectStore("dailyInputs");
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
 
+      const dataWithMeta = {
+        ...inputData,
+        createdAt: new Date().toISOString(),
+      };
+
+      const request = store.add(dataWithMeta);
+
+      request.onsuccess = () => {
+        resolve(request.result);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to save data"));
+      };
+    });
+  }
+
+  async getDailyInputs(kategori, tanggal = null) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readonly");
+      const store = transaction.objectStore("dailyInputs");
+
+      let index;
+      try {
+        index = store.index("kategori_tanggal");
+      } catch (e) {
+        index = store.index("kategori");
+      }
+
+      const range = tanggal
+        ? IDBKeyRange.only([kategori, tanggal])
+        : IDBKeyRange.bound([kategori, ""], [kategori, "\uffff"]);
+
+      const request = index.getAll(range);
+
+      request.onsuccess = () => {
+        resolve(request.result);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to retrieve data"));
+      };
+    });
+  }
+
+  async getDailyInputsFallback(kategori, tanggal = null) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readonly");
+      const store = transaction.objectStore("dailyInputs");
+      const index = store.index("kategori");
+
+      const request = index.getAll(kategori);
+
+      request.onsuccess = () => {
+        let results = request.result;
+        if (tanggal) {
+          results = results.filter((item) => item.tanggal === tanggal);
+        }
+        resolve(results);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to retrieve data with fallback"));
+      };
+    });
+  }
+
+  async updateDailyInput(id, updates) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
+
+      const getRequest = store.get(id);
+
+      getRequest.onsuccess = () => {
+        const existingData = getRequest.result;
+        if (!existingData) {
+          reject(new Error("Data not found"));
+          return;
+        }
+
+        const updatedData = {
+          ...existingData,
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        };
+
+        const putRequest = store.put(updatedData);
+
+        putRequest.onsuccess = () => {
+          resolve(updatedData);
+        };
+
+        putRequest.onerror = () => {
+          reject(new Error("Failed to update data"));
+        };
+      };
+
+      getRequest.onerror = () => {
+        reject(new Error("Failed to retrieve data for update"));
+      };
+    });
+  }
+
+  async deleteDailyInput(id) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
+
+      const request = store.delete(id);
+
+      request.onsuccess = () => {
+        resolve(true);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to delete data"));
+      };
+    });
+  }
+
+  async deleteDailyInputsByDate(kategori, tanggal) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
+      const index = store.index("kategori_tanggal");
+
+      const range = IDBKeyRange.only([kategori, tanggal]);
+      const request = index.getAll(range);
+
+      request.onsuccess = () => {
+        const itemsToDelete = request.result;
+
+        if (itemsToDelete.length === 0) {
+          resolve({ deletedCount: 0, errorCount: 0 });
+          return;
+        }
+
+        let deletedCount = 0;
+        let errorCount = 0;
+
+        itemsToDelete.forEach((item) => {
+          const deleteRequest = store.delete(item.id);
+          deleteRequest.onsuccess = () => {
+            deletedCount++;
+          };
+          deleteRequest.onerror = () => {
+            errorCount++;
+          };
+        });
+
+        transaction.oncomplete = () => {
+          resolve({ deletedCount, errorCount });
+        };
+
+        transaction.onerror = () => {
+          reject(new Error("Transaction failed during deletion"));
+        };
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to retrieve data for deletion"));
+      };
+    });
+  }
+
+  async deleteDailyInputsByDateFallback(kategori, tanggal) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
+      const index = store.index("kategori");
+
+      const request = index.getAll(kategori);
+
+      request.onsuccess = () => {
+        const allItems = request.result;
+        const itemsToDelete = allItems.filter(
+          (item) => item.tanggal === tanggal
+        );
+
+        let deletedCount = 0;
+        let errorCount = 0;
+
+        itemsToDelete.forEach((item) => {
+          const deleteRequest = store.delete(item.id);
+          deleteRequest.onsuccess = () => {
+            deletedCount++;
+          };
+          deleteRequest.onerror = () => {
+            errorCount++;
+          };
+        });
+
+        transaction.oncomplete = () => {
+          resolve({ deletedCount, errorCount });
+        };
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to retrieve data for deletion"));
+      };
+    });
+  }
+
+  async batchSaveDailyInputs(inputsArray) {
+    if (inputsArray.length === 0) return [];
+
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["dailyInputs"], "readwrite");
+      const store = transaction.objectStore("dailyInputs");
+
+      const results = [];
+      let completed = 0;
+
+      inputsArray.forEach((inputData, index) => {
         const dataWithMeta = {
           ...inputData,
           createdAt: new Date().toISOString(),
-          timestamp: Date.now(),
         };
 
         const request = store.add(dataWithMeta);
 
         request.onsuccess = () => {
-          resolve(request.result);
+          results[index] = request.result;
+          completed++;
+
+          if (completed === inputsArray.length) {
+            resolve(results);
+          }
         };
 
         request.onerror = () => {
-          console.error("❌ Save operation failed");
-          reject(new Error("Failed to save data"));
+          reject(new Error(`Failed to save item at index ${index}`));
         };
-
-        transaction.onerror = () => {
-          console.error("❌ Transaction failed");
-          reject(new Error("Transaction failed"));
-        };
-      } catch (error) {
-        console.error("❌ Database operation error:", error);
-        reject(error);
-      }
+      });
     });
   }
 
-  // Optimized query dengan composite index dan better error handling
-  async getDailyInputs(kategori, tanggal = null) {
+  async getAllDailyInputs() {
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readonly");
-        const store = transaction.objectStore("dailyInputs");
+      const transaction = this.db.transaction(["dailyInputs"], "readonly");
+      const store = transaction.objectStore("dailyInputs");
 
-        // Cek jika index tersedia, jika tidak gunakan fallback
-        let index;
-        try {
-          index = store.index("kategori_tanggal");
-        } catch (e) {
-          // Fallback ke index kategori biasa
-          console.warn("⚠️ Composite index not available, using fallback");
-          index = store.index("kategori");
-        }
+      const request = store.getAll();
 
-        const range = tanggal
-          ? IDBKeyRange.only([kategori, tanggal])
-          : IDBKeyRange.bound([kategori, ""], [kategori, "\uffff"]);
+      request.onsuccess = () => {
+        resolve(request.result);
+      };
 
-        const request = index.getAll(range);
-
-        request.onsuccess = () => {
-          resolve(request.result);
-        };
-
-        request.onerror = () => {
-          console.error("❌ Query operation failed");
-          reject(new Error("Failed to retrieve data"));
-        };
-
-        transaction.onerror = () => {
-          console.error("❌ Transaction failed");
-          reject(new Error("Transaction failed"));
-        };
-      } catch (error) {
-        console.error("❌ Database query error:", error);
-        reject(error);
-      }
+      request.onerror = () => {
+        reject(new Error("Failed to retrieve all data"));
+      };
     });
   }
 
-  // Cache operations untuk performance
+  // === CACHE METHODS ===
+
   async setCache(key, value, ttl = 300000) {
-    // 5 minutes default
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["cache"], "readwrite");
-        const store = transaction.objectStore("cache");
+      const transaction = this.db.transaction(["cache"], "readwrite");
+      const store = transaction.objectStore("cache");
 
-        const cacheItem = {
-          key,
-          value: JSON.stringify(value),
-          expires: Date.now() + ttl,
-          timestamp: Date.now(),
-        };
+      const cacheItem = {
+        key,
+        value: JSON.stringify(value),
+        expires: Date.now() + ttl,
+      };
 
-        const request = store.put(cacheItem);
+      const request = store.put(cacheItem);
 
-        request.onsuccess = () => {
-          resolve(true);
-        };
+      request.onsuccess = () => {
+        resolve(true);
+      };
 
-        request.onerror = () => {
-          console.error("❌ Cache set operation failed");
-          reject(new Error("Failed to set cache"));
-        };
-      } catch (error) {
-        console.error("❌ Cache operation error:", error);
-        reject(error);
-      }
+      request.onerror = () => {
+        reject(new Error("Failed to set cache"));
+      };
     });
   }
 
@@ -267,42 +392,34 @@ class JimpitanDB {
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["cache"], "readonly");
-        const store = transaction.objectStore("cache");
+      const transaction = this.db.transaction(["cache"], "readonly");
+      const store = transaction.objectStore("cache");
 
-        const request = store.get(key);
+      const request = store.get(key);
 
-        request.onsuccess = () => {
-          const result = request.result;
-          if (!result) {
-            resolve(null);
-            return;
-          }
+      request.onsuccess = () => {
+        const result = request.result;
+        if (!result) {
+          resolve(null);
+          return;
+        }
 
-          // Check expiration
-          if (result.expires < Date.now()) {
-            this.clearCache(key); // Async cleanup
-            resolve(null);
-            return;
-          }
+        if (result.expires < Date.now()) {
+          this.clearCache(key);
+          resolve(null);
+          return;
+        }
 
-          try {
-            resolve(JSON.parse(result.value));
-          } catch (e) {
-            console.error("❌ Cache parse error:", e);
-            resolve(null);
-          }
-        };
+        try {
+          resolve(JSON.parse(result.value));
+        } catch (e) {
+          resolve(null);
+        }
+      };
 
-        request.onerror = () => {
-          console.error("❌ Cache get operation failed");
-          reject(new Error("Failed to get cache"));
-        };
-      } catch (error) {
-        console.error("❌ Cache operation error:", error);
-        reject(error);
-      }
+      request.onerror = () => {
+        reject(new Error("Failed to get cache"));
+      };
     });
   }
 
@@ -310,352 +427,128 @@ class JimpitanDB {
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["cache"], "readwrite");
-        const store = transaction.objectStore("cache");
+      const transaction = this.db.transaction(["cache"], "readwrite");
+      const store = transaction.objectStore("cache");
 
-        const request = store.delete(key);
+      const request = store.delete(key);
 
-        request.onsuccess = () => {
-          resolve(true);
-        };
+      request.onsuccess = () => {
+        resolve(true);
+      };
 
-        request.onerror = () => {
-          console.error("❌ Cache clear operation failed");
-          reject(new Error("Failed to clear cache"));
-        };
-      } catch (error) {
-        console.error("❌ Cache operation error:", error);
-        reject(error);
-      }
+      request.onerror = () => {
+        reject(new Error("Failed to clear cache"));
+      };
     });
   }
 
-  // Cleanup expired cache entries
   async cleanupExpiredCache() {
     await this.ensureInit();
 
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["cache"], "readwrite");
-        const store = transaction.objectStore("cache");
-        const index = store.index("expires");
+      const transaction = this.db.transaction(["cache"], "readwrite");
+      const store = transaction.objectStore("cache");
+      const index = store.index("expires");
 
-        const range = IDBKeyRange.upperBound(Date.now());
-        const request = index.getAllKeys(range);
+      const range = IDBKeyRange.upperBound(Date.now());
+      const request = index.getAllKeys(range);
 
-        request.onsuccess = () => {
-          const keysToDelete = request.result;
+      request.onsuccess = () => {
+        const keysToDelete = request.result;
+        let deletedCount = 0;
 
-          if (keysToDelete.length === 0) {
-            resolve(0);
-            return;
-          }
-
-          let deletedCount = 0;
-          let errorCount = 0;
-
-          keysToDelete.forEach((key) => {
-            const deleteRequest = store.delete(key);
-            deleteRequest.onsuccess = () => {
-              deletedCount++;
-            };
-            deleteRequest.onerror = () => {
-              errorCount++;
-            };
-          });
-
-          transaction.oncomplete = () => {
-            console.log(`🧹 Cleaned up ${deletedCount} expired cache entries`);
-            resolve(deletedCount);
-          };
-
-          transaction.onerror = () => {
-            console.error("❌ Cache cleanup transaction failed");
-            reject(new Error("Cache cleanup transaction failed"));
-          };
-        };
-
-        request.onerror = () => {
-          console.error("❌ Cache cleanup failed");
-          reject(new Error("Failed to cleanup cache"));
-        };
-      } catch (error) {
-        console.error("❌ Cache cleanup error:", error);
-        reject(error);
-      }
-    });
-  }
-
-  // Fallback method jika composite index bermasalah
-  async getDailyInputsFallback(kategori, tanggal = null) {
-    await this.ensureInit();
-
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readonly");
-        const store = transaction.objectStore("dailyInputs");
-        const index = store.index("kategori");
-
-        const request = index.getAll(kategori);
-
-        request.onsuccess = () => {
-          let results = request.result;
-
-          // Filter manual oleh tanggal jika diperlukan
-          if (tanggal) {
-            results = results.filter((item) => item.tanggal === tanggal);
-          }
-
-          resolve(results);
-        };
-
-        request.onerror = () => {
-          reject(new Error("Failed to retrieve data with fallback"));
-        };
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  // Optimized bulk delete dengan range query
-  async deleteDailyInputsByDate(kategori, tanggal) {
-    await this.ensureInit();
-
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
-        const store = transaction.objectStore("dailyInputs");
-
-        let index;
-        try {
-          // Coba gunakan composite index dulu
-          index = store.index("kategori_tanggal");
-        } catch (e) {
-          // Fallback ke index kategori biasa
-          console.warn(
-            "⚠️ Composite index not available, using kategori index"
-          );
-          index = store.index("kategori");
-        }
-
-        const range = IDBKeyRange.only([kategori, tanggal]);
-        const request = index.getAll(range);
-
-        request.onsuccess = () => {
-          const itemsToDelete = request.result;
-
-          if (itemsToDelete.length === 0) {
-            resolve({ deletedCount: 0, errorCount: 0 });
-            return;
-          }
-
-          let deletedCount = 0;
-          let errorCount = 0;
-
-          itemsToDelete.forEach((item) => {
-            const deleteRequest = store.delete(item.id);
-            deleteRequest.onsuccess = () => {
-              deletedCount++;
-            };
-            deleteRequest.onerror = () => {
-              errorCount++;
-              console.error("❌ Failed to delete item:", item.id);
-            };
-          });
-
-          transaction.oncomplete = () => {
-            console.log(
-              `✅ Deleted ${deletedCount} records for ${kategori} on ${tanggal}`
-            );
-            resolve({ deletedCount, errorCount });
-          };
-
-          transaction.onerror = () => {
-            console.error("❌ Delete transaction failed");
-            reject(new Error("Transaction failed during deletion"));
-          };
-        };
-
-        request.onerror = () => {
-          console.error("❌ Failed to retrieve data for deletion");
-          reject(new Error("Failed to retrieve data for deletion"));
-        };
-      } catch (error) {
-        console.error("❌ Delete operation error:", error);
-        reject(error);
-      }
-    });
-  }
-
-  // Fallback delete method menggunakan loop manual
-  async deleteDailyInputsByDateFallback(kategori, tanggal) {
-    await this.ensureInit();
-
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
-        const store = transaction.objectStore("dailyInputs");
-        const index = store.index("kategori");
-
-        const request = index.getAll(kategori);
-
-        request.onsuccess = () => {
-          const allItems = request.result;
-          const itemsToDelete = allItems.filter(
-            (item) => item.tanggal === tanggal
-          );
-
-          if (itemsToDelete.length === 0) {
-            resolve({ deletedCount: 0, errorCount: 0 });
-            return;
-          }
-
-          let deletedCount = 0;
-          let errorCount = 0;
-
-          itemsToDelete.forEach((item) => {
-            const deleteRequest = store.delete(item.id);
-            deleteRequest.onsuccess = () => {
-              deletedCount++;
-            };
-            deleteRequest.onerror = () => {
-              errorCount++;
-            };
-          });
-
-          transaction.oncomplete = () => {
-            resolve({ deletedCount, errorCount });
-          };
-
-          transaction.onerror = () => {
-            reject(new Error("Transaction failed during deletion"));
-          };
-        };
-
-        request.onerror = () => {
-          reject(new Error("Failed to retrieve data for deletion"));
-        };
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  // Batch operations untuk performance
-  async batchSaveDailyInputs(inputsArray) {
-    if (inputsArray.length === 0) return [];
-
-    await this.ensureInit();
-
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(["dailyInputs"], "readwrite");
-        const store = transaction.objectStore("dailyInputs");
-
-        const results = [];
-        let completed = 0;
-        let hasError = false;
-
-        inputsArray.forEach((inputData, index) => {
-          const dataWithMeta = {
-            ...inputData,
-            createdAt: new Date().toISOString(),
-            timestamp: Date.now(),
-          };
-
-          const request = store.add(dataWithMeta);
-
-          request.onsuccess = () => {
-            results[index] = request.result;
-            completed++;
-
-            if (completed === inputsArray.length && !hasError) {
-              resolve(results);
-            }
-          };
-
-          request.onerror = () => {
-            hasError = true;
-            console.error(`❌ Failed to save item at index ${index}`);
-            reject(new Error(`Failed to save item at index ${index}`));
+        keysToDelete.forEach((key) => {
+          const deleteRequest = store.delete(key);
+          deleteRequest.onsuccess = () => {
+            deletedCount++;
           };
         });
 
-        transaction.onerror = () => {
-          hasError = true;
-          console.error("❌ Batch save transaction failed");
-          reject(new Error("Batch save transaction failed"));
+        transaction.oncomplete = () => {
+          resolve(deletedCount);
         };
-      } catch (error) {
-        console.error("❌ Batch save operation error:", error);
-        reject(error);
-      }
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to cleanup cache"));
+      };
     });
   }
 
-  // Utility methods dengan better error handling
-  async ensureInit() {
-    if (!this.initialized) {
-      await this.init();
-    }
+  // === SETTINGS METHODS ===
 
-    // Double check jika database masih terbuka
-    if (!this.db) {
-      throw new Error("Database not available");
-    }
+  async saveSetting(key, value) {
+    await this.ensureInit();
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["settings"], "readwrite");
+      const store = transaction.objectStore("settings");
+
+      const request = store.put({ key, value });
+
+      request.onsuccess = () => {
+        resolve(true);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to save setting"));
+      };
+    });
   }
 
-  // Database repair function
-  async repairDatabase() {
-    console.log("🔧 Attempting database repair...");
+  async getSetting(key) {
+    await this.ensureInit();
 
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(["settings"], "readonly");
+      const store = transaction.objectStore("settings");
+
+      const request = store.get(key);
+
+      request.onsuccess = () => {
+        resolve(request.result ? request.result.value : null);
+      };
+
+      request.onerror = () => {
+        reject(new Error("Failed to get setting"));
+      };
+    });
+  }
+
+  // === UTILITY METHODS ===
+
+  async repairDatabase() {
     try {
-      // Close existing connection
       if (this.db) {
         this.db.close();
         this.initialized = false;
         this.db = null;
       }
 
-      // Delete database dan buat ulang
       await new Promise((resolve, reject) => {
         const deleteRequest = indexedDB.deleteDatabase(this.dbName);
 
         deleteRequest.onsuccess = () => {
-          console.log("✅ Old database deleted");
           resolve();
         };
 
         deleteRequest.onerror = () => {
-          console.error("❌ Failed to delete old database");
           reject(new Error("Failed to delete database"));
-        };
-
-        deleteRequest.onblocked = () => {
-          console.warn("⚠️ Database deletion blocked");
-          reject(new Error("Database deletion blocked"));
         };
       });
 
-      // Reinitialize
       await this.init();
-      console.log("✅ Database repaired successfully");
       return true;
     } catch (error) {
-      console.error("❌ Database repair failed:", error);
       return false;
     }
   }
 
-  // Check database health
   async checkHealth() {
     try {
       await this.ensureInit();
 
       const stores = ["dailyInputs", "settings", "cache"];
-
       const health = {};
 
       for (const storeName of stores) {
@@ -666,42 +559,20 @@ class JimpitanDB {
 
           health[storeName] = await new Promise((resolve) => {
             countRequest.onsuccess = () =>
-              resolve({
-                exists: true,
-                count: countRequest.result,
-              });
-            countRequest.onerror = () =>
-              resolve({
-                exists: false,
-                error: "Store not accessible",
-              });
+              resolve({ exists: true, count: countRequest.result });
+            countRequest.onerror = () => resolve({ exists: false });
           });
         } catch (error) {
-          health[storeName] = {
-            exists: false,
-            error: error.message,
-          };
+          health[storeName] = { exists: false };
         }
       }
 
       return health;
     } catch (error) {
-      return {
-        overall: "unhealthy",
-        error: error.message,
-      };
+      return { overall: "unhealthy" };
     }
   }
 }
 
-// Create global optimized instance
+// Create global instance
 const jimpitanDB = new JimpitanDB();
-
-// Export repair function untuk global access
-window.jimpitanDBRepair = () => jimpitanDB.repairDatabase();
-window.jimpitanDBCheckHealth = () => jimpitanDB.checkHealth();
-
-// Auto cleanup expired cache every hour
-setInterval(() => {
-  jimpitanDB.cleanupExpiredCache?.().catch(() => {});
-}, 60 * 60 * 1000);
